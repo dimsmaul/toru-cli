@@ -1,19 +1,24 @@
 import SwiftUI
 
+/// Detail-pane layout: SwiftTerm terminal on top, slim status bar below.
 struct TerminalPaneView: View {
     @ObservedObject var themeManager: ThemeManager
     @State private var showHistorySearch = false
 
     var body: some View {
         ZStack(alignment: .top) {
-            TorTerminalContainer(themeManager: themeManager)
-                .background(Color(themeManager.current.backgroundColor))
-                .ignoresSafeArea(edges: .bottom)
+            VStack(spacing: 0) {
+                TorTerminalContainer(themeManager: themeManager)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                TerminalStatusBar()
+            }
+            .ignoresSafeArea(edges: .bottom)
 
             if showHistorySearch {
                 HistorySearchOverlay(
                     isPresented: $showHistorySearch,
-                    onSelect: { _ in /* paste handled outside MVP */ }
+                    onSelect: { _ in /* paste-on-select wired in v1.1 */ }
                 )
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(10)

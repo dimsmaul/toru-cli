@@ -22,6 +22,10 @@ final class TorTerminalView: LocalProcessTerminalView {
     private var keyMonitor: Any?
     private lazy var procDelegate = TorProcessDelegate(owner: self)
 
+    /// External tap on raw PTY bytes. Set by `TorTerminalContainer` so a
+    /// SwiftUI `BlockStore` can mirror the shell's output.
+    var onPtyBytes: ((ArraySlice<UInt8>) -> Void)?
+
     // MARK: - Init
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -57,14 +61,52 @@ final class TorTerminalView: LocalProcessTerminalView {
 
     func startShell() {
         let shell = PTYBridge.resolveShell()
-        let env = PTYBridge.envArray()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+
+        FileManager.default.changeCurrentDirectoryPath(home)
+
+        var envDict = PTYBridge.buildEnvironment(shell: shell)
+        envDict["HOME"] = home
+        envDict["PWD"] = home
+        envDict["SHELL"] = shell
+        // Hint cols/rows for tools that read $COLUMNS / $LINES instead of
+        // querying the kernel via TIOCGWINSZ. 80/40 keeps `ls` / `tree` /
+        // `git status` from emitting super-wide rows that overflow the
+        // block card's horizontal space and force unsightly wrapping.
+        envDict["COLUMNS"] = "80"
+        envDict["LINES"] = "40"
+        let env = envDict.map { "\($0.key)=\($0.value)" }
+
         startProcess(executable: shell, args: ["-l"], environment: env, execName: shell)
+
+        // Pin the PTY to 80×40 so column-laying tools (ls, tree, …) stay
+        // within the block card's horizontal space.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.pinPtySize(cols: 80, rows: 40)
+        }
+
+        // Hand the live shell PID to SessionMonitor so the status bar can
+        // poll cwd / runtime / git from a real process.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            let pid = self.process.shellPid
+            if pid > 0 {
+                Task { @MainActor in SessionMonitor.shared.attach(pid: pid) }
+            }
+        }
+
+        // (Previously: sent ^L 250ms after spawn to wipe the cosmetic
+        // "zsh: can't set tty pgrp" line. Removed — with ZLE off the ^L
+        // ends up prepended to the first command in zsh's line buffer.
+        // The tty-pgrp warning is now filtered out by AnsiStripper's
+        // line-level pass instead.)
     }
 
     // MARK: - Theme
     func applyTheme(_ theme: Theme) {
         currentTheme = theme
-        nativeBackgroundColor = theme.backgroundColor
+        // Transparent native bg lets the parent NSVisualEffectView shine through.
+        nativeBackgroundColor = .clear
         nativeForegroundColor = theme.foregroundColor
 
         let cs = theme.ansiColors
@@ -76,7 +118,7 @@ final class TorTerminalView: LocalProcessTerminalView {
             })
         }
         wantsLayer = true
-        layer?.backgroundColor = theme.backgroundColor.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     // MARK: - Key intercept (NSEvent local monitor)
@@ -171,6 +213,56 @@ final class TorTerminalView: LocalProcessTerminalView {
                        directory: NSHomeDirectory(),
                        sessionId: sessionId)
     }
+
+    // MARK: - PTY tap
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        super.dataReceived(slice: slice)
+        if let tap = onPtyBytes {
+            let copy = Array(slice)
+            DispatchQueue.main.async {
+                tap(ArraySlice(copy))
+            }
+        }
+    }
+
+    // MARK: - Foreground process detection
+
+    /// `true` when the shell itself is the foreground process group of the
+    /// PTY (i.e. sitting at a prompt waiting for the next command).
+    /// `false` while a child program is running and reading stdin
+    /// (e.g. `npm init` Q&A, `claude`, `vim`, `ssh` password prompt).
+    func isShellAtPrompt() -> Bool {
+        guard process != nil, process.childfd >= 0, process.shellPid > 0 else {
+            return true  // fail-safe: treat as prompt so submits keep working
+        }
+        let fg = tcgetpgrp(process.childfd)
+        return fg <= 0 || fg == process.shellPid
+    }
+
+    // MARK: - Hidden-view size pinning
+
+    /// Force the underlying SwiftTerm `Terminal` and the kernel-level PTY
+    /// winsize to a sensible cols/rows. The NSView itself stays 0×0.
+    func pinPtySize(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        getTerminal().resize(cols: cols, rows: rows)
+        if process != nil, process.childfd >= 0 {
+            var ws = winsize(ws_row: UInt16(rows),
+                             ws_col: UInt16(cols),
+                             ws_xpixel: 0, ws_ypixel: 0)
+            _ = PseudoTerminalHelpers.setWinSize(
+                masterPtyDescriptor: process.childfd,
+                windowSize: &ws
+            )
+        }
+    }
+
+    // Note: SwiftTerm's `sizeChanged(source:newCols:newRows:)` is not
+    // `open`, so we can't override it. Since the NSView stays 0×0 the
+    // delegate only fires once with cols=0/rows=0 at startup; our
+    // post-startup `pinPtySize(220, 50)` runs immediately afterwards and
+    // becomes the steady-state size.
 
     fileprivate func updateWindowTitle(_ title: String) {
         window?.title = title.isEmpty ? "Toru CLI" : title

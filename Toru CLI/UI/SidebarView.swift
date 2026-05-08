@@ -16,22 +16,38 @@ final class SessionStore: ObservableObject {
     init() { selectedID = sessions.first?.id }
 
     func newSession() {
-        let s = TerminalSession(title: "Session \(sessions.count + 1)")
-        sessions.append(s)
-        selectedID = s.id
+        // Defer mutations so we never publish during a view-update pass.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let s = TerminalSession(title: "Session \(self.sessions.count + 1)")
+            self.sessions.append(s)
+            self.selectedID = s.id
+        }
     }
 
     func close(_ id: UUID) {
-        sessions.removeAll { $0.id == id }
-        if selectedID == id { selectedID = sessions.first?.id }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sessions.removeAll { $0.id == id }
+            if self.selectedID == id { self.selectedID = self.sessions.first?.id }
+        }
     }
 }
 
 struct SidebarView: View {
     @ObservedObject var store: SessionStore
 
+    private var selectionBinding: Binding<UUID?> {
+        Binding(
+            get: { store.selectedID },
+            set: { newValue in
+                DispatchQueue.main.async { store.selectedID = newValue }
+            }
+        )
+    }
+
     var body: some View {
-        List(selection: $store.selectedID) {
+        List(selection: selectionBinding) {
             Section("Sessions") {
                 ForEach(store.sessions) { session in
                     HStack {

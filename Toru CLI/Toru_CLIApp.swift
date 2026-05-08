@@ -15,7 +15,9 @@ struct Toru_CLIApp: App {
                 .environmentObject(settings)
                 .frame(minWidth: 720, minHeight: 460)
                 .onAppear {
-                    themeManager.select(name: settings.themeName)
+                    DispatchQueue.main.async {
+                        themeManager.select(name: settings.themeName)
+                    }
                 }
         }
         .windowStyle(.titleBar)
