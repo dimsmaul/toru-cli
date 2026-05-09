@@ -147,3 +147,82 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+
+      # Bumps the Homebrew Cask in `dimsmaul/homebrew-toru` so users get
+      # `brew install --cask dimsmaul/toru/toru-cli` without ever seeing
+      # Gatekeeper's "couldn't verify" warning. Homebrew strips the
+      # quarantine attribute on cask installs, which is the legal,
+      # zero-cost equivalent of right-click → Open.
+      #
+      # Required secret: `HOMEBREW_TAP_TOKEN`
+      #   - Fine-grained PAT
+      #   - Repository access: only `dimsmaul/homebrew-toru`
+      #   - Permissions: Contents → Read and write
+      - name: Bump Homebrew Cask (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+          VERSION: ${{ steps.ver.outputs.label }}
+          REPO_OWNER: dimsmaul
+          REPO_NAME: toru-cli
+          TAP_REPO: dimsmaul/homebrew-toru
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping cask bump."
+            exit 0
+          fi
+
+          SHA=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
+          # Cask `version` is the bare semver. The leading `v` belongs to
+          # the git tag and the URL, not the version string.
+          VER_NUM="${VERSION#v}"
+
+          TMP=$(mktemp -d)
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" \
+            "$TMP"
+
+          mkdir -p "$TMP/Casks"
+          # Single-quoted heredoc keeps Ruby's `#{version}` literal so
+          # Homebrew interpolates it at install time. Bash variables are
+          # substituted via `sed` after.
+          cat > "$TMP/Casks/toru-cli.rb" <<'RUBY'
+          cask "toru-cli" do
+            version "__VER__"
+            sha256 "__SHA__"
+
+            url "https://github.com/__OWNER__/__REPO__/releases/download/v#{version}/Toru-CLI-v#{version}.dmg"
+            name "Toru CLI"
+            desc "Block-based macOS terminal"
+            homepage "https://github.com/__OWNER__/__REPO__"
+
+            app "Toru CLI.app"
+
+            zap trash: [
+              "~/Library/Application Support/Toru CLI",
+              "~/Library/Preferences/com.torucli.Toru-CLI.plist",
+              "~/Library/Saved Application State/com.torucli.Toru-CLI.savedState",
+            ]
+          end
+          RUBY
+
+          sed -i '' \
+            -e "s|__VER__|${VER_NUM}|g" \
+            -e "s|__SHA__|${SHA}|g" \
+            -e "s|__OWNER__|${REPO_OWNER}|g" \
+            -e "s|__REPO__|${REPO_NAME}|g" \
+            "$TMP/Casks/toru-cli.rb"
+
+          cd "$TMP"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/toru-cli.rb
+          if git diff --cached --quiet; then
+            echo "Cask already at ${VER_NUM} — nothing to push."
+            exit 0
+          fi
+          git commit -m "toru-cli ${VER_NUM}"
+          git push origin HEAD
