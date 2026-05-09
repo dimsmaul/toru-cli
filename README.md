@@ -1,49 +1,102 @@
-# Toru CLI
+<div align="center">
+  <img src=".github/assets/logo.png" alt="Toru CLI logo" width="160" />
 
-A native macOS terminal emulator built in Swift. Lightweight, comment-aware, with fish-style autocomplete — 100% local, no AI, no cloud, no account.
+  # Toru CLI
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-blue.svg)](#requirements)
-[![Swift](https://img.shields.io/badge/Swift-5.10%2B-orange.svg)](#requirements)
+  A native macOS terminal emulator built in Swift. Lightweight, comment-aware, with fish-style autocomplete — 100% local, no AI, no cloud, no account.
 
-![Toru CLI](docs/images/screenshot.png)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+  [![macOS](https://img.shields.io/badge/macOS-15.5%2B-blue.svg)](#requirements)
+  [![Swift](https://img.shields.io/badge/Swift-5.10%2B-orange.svg)](#requirements)
+  [![Release](https://github.com/dimsmaul/toru-cli/actions/workflows/release.yml/badge.svg)](https://github.com/dimsmaul/toru-cli/actions/workflows/release.yml)
+</div>
 
 ## Features
 
-- **Native macOS UI** — SwiftUI + AppKit. NavigationSplitView, native tabs (`NSWindowTabbing`), system accent color, automatic dark/light.
+- **Native macOS UI** — SwiftUI + AppKit. NavigationSplitView, native tabs, system accent color, automatic dark/light.
+- **Block-based output** — every command and its output live in their own collapsible card, Warp-style.
 - **Comment skipping** — lines beginning with `#` are visible but not executed. Multi-line blocks are filtered before they reach the shell.
 - **Fish-style inline autocomplete** — ghost text driven by your local SQLite history. Press `→` or `Tab` to accept.
-- **History fuzzy search** — `Ctrl+R` opens an inline floating search panel.
+- **History fuzzy search** — `Cmd+F` filters and highlights matches across the visible blocks.
+- **Tab rename per running command** — `bun start` becomes the tab title until it exits, then reverts.
 - **Tab completion** — `$PATH` commands and files in the working directory.
 - **Themes** — five built-ins (Dark, Light, Solarized Dark, Tokyo Night, One Dark). Drop a JSON file into Settings → Appearance to import a custom theme.
 - **No telemetry, no network calls.** Everything runs locally.
 
-## Requirements
-
-- macOS 14 (Sonoma) or newer
-- Xcode 16+ to build from source
-- Swift 5.10+
-
 ## Install
 
-Download the latest signed and notarized DMG from the [Releases page](https://github.com/dimsmauls/toru-cli/releases) and drag `Toru CLI.app` to your `Applications` folder.
+### Homebrew (recommended)
+
+The fastest path. Homebrew strips the macOS quarantine attribute on cask installs, so Toru launches without the *"Apple could not verify…"* dialog.
+
+```bash
+brew tap dimsmaul/toru-cli
+brew install --cask toru-cli
+```
+
+Update later with:
+
+```bash
+brew upgrade --cask toru-cli
+```
+
+### Direct DMG
+
+Grab the latest DMG from the [Releases page](https://github.com/dimsmaul/toru-cli/releases) and drag `Toru CLI.app` to `/Applications`.
+
+The DMG is **ad-hoc signed but not Apple-notarized** (no paid Developer ID), so the first launch is gated by Gatekeeper. Bypass it once via either:
+
+- **Right-click** the app in `/Applications` → **Open** → **Open** in the confirmation dialog. macOS remembers the choice.
+- Or strip the quarantine flag in Terminal:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Toru CLI.app"
+  ```
+
+Subsequent launches are normal.
+
+## Requirements
+
+- macOS 15.5 (Sequoia) or newer
+- Xcode 16+ to build from source
+- Swift 5.10+
 
 ## Build from source
 
 ```bash
-git clone https://github.com/dimsmauls/toru-cli.git
+git clone https://github.com/dimsmaul/toru-cli.git
 cd "toru-cli/Toru CLI"
 open "Toru CLI.xcodeproj"
 ```
 
-Press `⌘R` in Xcode. Or use the command line:
+Press `⌘R` in Xcode. Or build a distributable DMG locally:
 
 ```bash
-make build      # debug build
-make test       # unit tests (CommentFilter, AutocompleteEngine, HistoryDatabase)
-make dmg        # release build + DMG packaging
-make notarize   # notarize via xcrun notarytool (requires AC_USERNAME / AC_PASSWORD / AC_TEAM_ID env vars)
+./scripts/build-dmg.sh             # version derived from `git describe`
+./scripts/build-dmg.sh v1.2.3      # explicit version label
 ```
+
+Output lands in `dist/Toru-CLI-<version>.dmg`.
+
+## Releasing (maintainers)
+
+The release pipeline lives in [.github/workflows/release.yml](.github/workflows/release.yml). It auto-bumps the latest semver tag, builds, signs ad-hoc, packages a DMG, attaches it to a GitHub Release, and pushes a Cask update to [`dimsmaul/homebrew-toru-cli`](https://github.com/dimsmaul/homebrew-toru-cli).
+
+Three ways to trigger a release:
+
+- **Commit-driven** (preferred). Push a commit to `main` whose message contains `release: patch`, `release: minor`, or `release: major`. The workflow bumps the latest `v*` tag accordingly and builds.
+
+  ```
+  fix: terminal flicker on resize
+
+  release: patch
+  ```
+
+- **Manual dispatch.** Actions tab → *Release* → *Run workflow*, set `bump` to `patch` / `minor` / `major`. Same outcome as commit-driven.
+
+- **Direct tag push.** `git tag v0.2.0 && git push origin v0.2.0`. Skips the bump step but still builds and publishes.
+
+A run with `bump = none` and an optional `version` label produces a downloadable artifact only — no Release row, no Cask bump. Useful for one-off test builds.
 
 ## Keybindings
 
@@ -51,7 +104,7 @@ make notarize   # notarize via xcrun notarytool (requires AC_USERNAME / AC_PASSW
 |----------------|------------------------------|
 | `→` / `Tab`    | Accept ghost-text suggestion |
 | `Escape`       | Dismiss ghost text / popup   |
-| `Ctrl+R`       | History fuzzy search         |
+| `Cmd+F`        | Search blocks (highlight matches) |
 | `Tab`          | Tab completion (when no ghost) |
 | `⌘T`           | New tab                      |
 | `⌘W`           | Close tab                    |
@@ -59,7 +112,7 @@ make notarize   # notarize via xcrun notarytool (requires AC_USERNAME / AC_PASSW
 | `⌘⇧D`          | Split pane vertical          |
 | `⌘,`           | Settings                     |
 | `⌘+` / `⌘-`    | Increase / decrease font size |
-| `⌘K`           | Clear terminal buffer        |
+| `⌘K`           | Clear blocks                 |
 | `⌘⇧C` / `⌘⇧V`  | Copy / paste                 |
 
 ## Comment syntax
@@ -79,7 +132,7 @@ Only `bun run build` and `gcloud run deploy` are executed. The comment lines rem
 
 ```
 SwiftUI Layer
-  WindowGroup → NavigationSplitView → Toolbar
+  WindowGroup → NavigationSplitView → Sessions / Tabs
         │
 AppKit Bridge (NSViewRepresentable)
         │
@@ -87,6 +140,9 @@ TorTerminalView : LocalProcessTerminalView (SwiftTerm)
         │
 Input Pipeline
   CommentFilter → AutocompleteEngine → PTY
+        │
+Output Pipeline
+  PTY tap → AnsiAttributedRenderer + GridEmulator → BlockStore
         │
 Persistence
   HistoryDatabase (GRDB / SQLite)
