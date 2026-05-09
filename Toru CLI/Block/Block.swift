@@ -22,17 +22,17 @@ final class Block: Identifiable, ObservableObject {
 
     /// `true` once the streaming renderer reports that this command
     /// emitted CSI cursor moves / clears (neofetch, ascii art, fancy
-    /// progress bars). Currently informational — we keep the streamed
-    /// colored output anyway since stripping color hurts more than the
-    /// occasional layout quirk.
-    var usedCursorMoves: Bool = false
+    /// progress bars). Used by `ShellBridge.applyGridSnapshotIfNeeded`
+    /// to swap streamed output for grid-rendered output at finalize.
+    @Published var usedCursorMoves: Bool = false
 
-    /// `true` once SwiftTerm switched to the alternate screen buffer
-    /// during this command's run (vim, htop, less, claude code, fzf).
-    /// `BlockStore.markCurrentDone` clears the streamed output for
-    /// these blocks because the live transcript is just thousands of
-    /// CSI redraws that look like garbage when flat-appended.
-    var usedAlternateScreen: Bool = false
+    /// `true` once the foreground program switched to the alternate
+    /// screen buffer (vim, htop, less, claude code, fzf). Drives a UI
+    /// switch in `ActiveCellView` from inline block render to a full
+    /// SwiftTerm surface so the TUI has a place to draw, and tells
+    /// `BlockStore.markCurrentDone` to replace the (garbage) streamed
+    /// transcript with a `(interactive session)` marker.
+    @Published var usedAlternateScreen: Bool = false
 
     private var notifyScheduled = false
 

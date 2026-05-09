@@ -255,6 +255,28 @@ final class TorTerminalView: LocalProcessTerminalView {
 
     // MARK: - Hidden-view size pinning
 
+    /// Floor for accepting NSView frame changes from SwiftUI. When
+    /// `ActiveCellView` parks SwiftTerm at `1x1` for the inline-block
+    /// path (TUI not active — only keyboard / PTY plumbing needed), the
+    /// resulting `setFrameSize(1,1)` would cascade through SwiftTerm's
+    /// `processSizeChange` → `terminal.resize(0, 0)` and leave the
+    /// shell with a 0-column buffer. Anything written next renders one
+    /// character per row instead of normal text.
+    ///
+    /// We intercept those degenerate sizes here and keep SwiftTerm's
+    /// frame at whatever it previously was. `pinPtySize` continues to
+    /// drive cols/rows from the pane GeometryReader, which is the
+    /// authoritative size source anyway.
+    private static let minAcceptedFrame: CGFloat = 24
+
+    public override func setFrameSize(_ newSize: NSSize) {
+        if newSize.width < Self.minAcceptedFrame ||
+           newSize.height < Self.minAcceptedFrame {
+            return
+        }
+        super.setFrameSize(newSize)
+    }
+
     /// Force the underlying SwiftTerm `Terminal` and the kernel-level PTY
     /// winsize to a sensible cols/rows. The NSView itself stays 0×0.
     func pinPtySize(cols: Int, rows: Int) {

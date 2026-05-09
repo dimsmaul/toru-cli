@@ -46,6 +46,15 @@ final class AnsiAttributedRenderer {
     private var style = Style()
     private var col: Int = 0
 
+    /// PTY in default `ONLCR` mode emits `\r\n` for every newline. The
+    /// streaming renderer used to treat CR and LF as separate newline
+    /// emits — that double-spaced every line of `ls`, `cat`, etc. We
+    /// now hold off on the CR's newline and merge it with a following
+    /// LF. A lone CR (progress bars, e.g. `\r10%\r20%`) still emits a
+    /// newline because we can't reposition the cursor inside a flat
+    /// `AttributedString`.
+    private var pendingCR: Bool = false
+
     /// Mini terminal-screen emulator running parallel to the streaming
     /// path. We feed every chunk into both — the streamer produces the
     /// live `AttributedString` for `Block.output` while the command
@@ -132,19 +141,33 @@ final class AnsiAttributedRenderer {
     // MARK: - Byte handlers
 
     private func handleText(_ b: UInt8, into out: inout AttributedString) {
+        // Resolve any pending CR. If the next byte is LF, the pair was
+        // a single CRLF and we drop the CR-induced newline. Otherwise
+        // it was a lone CR (progress-bar reset) — emit one newline
+        // before processing `b`.
+        if pendingCR {
+            if b == 0x0A {
+                pendingText.append(0x0A)
+                col = 0
+                pendingCR = false
+                return
+            }
+            pendingText.append(0x0A)
+            col = 0
+            pendingCR = false
+        }
+
         switch b {
         case 0x1B:  // ESC
             flushPending(into: &out)
             state = .esc
-        case 0x0A:  // LF
+        case 0x0A:  // LF (lone — pendingCR was false above)
             pendingText.append(0x0A)
             col = 0
-        case 0x0D:  // CR — render as LF so progress redraws (npm/bun
-                    // install spinners, curl progress bars, etc.) flow
-                    // top-to-bottom instead of overwriting on a single
-                    // visually-collapsed line.
-            pendingText.append(0x0A)
-            col = 0
+        case 0x0D:  // CR — defer; merge with following LF or emit on
+                    // any other byte. Stops PTY's `ONLCR` (\n → \r\n)
+                    // from doubling newlines for every line of output.
+            pendingCR = true
         case 0x09:  // TAB → expand to next 8-col stop
             let spaces = 8 - (col % 8)
             for _ in 0..<spaces { pendingText.append(0x20) }

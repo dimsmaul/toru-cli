@@ -70,23 +70,24 @@ struct ActiveCellView: View {
         isDragging ? frozenInnerHeight : effectiveRunHeight
     }
 
+
     var body: some View {
         VStack(spacing: 0) {
             if mode == .running {
                 dragHandle
                 runningHeader
+                // SwiftTerm shown for every running command. It's the
+                // authoritative live renderer (handles every CSI, real
+                // keyboard delivery, true cursor) and there's no good
+                // way to half-mount it without breaking input. The
+                // history block render stays correct because
+                // `ShellBridge.applyGridSnapshotIfNeeded` swaps in the
+                // grid emulator's `AttributedString` at finalize.
                 EmbeddedTerminalView(host: tab.host)
                     .frame(maxWidth: .infinity)
-                    // Inner frame: fixed during drag so SwiftTerm
-                    // doesn't reflow per drag tick.
                     .frame(height: innerTerminalHeight)
-                    // Outer frame: visible region. `.clipped()` hides
-                    // the part of SwiftTerm that overflows during a
-                    // shrink-drag — the terminal keeps rendering at
-                    // its frozen size, the user just sees less.
                     .frame(height: effectiveRunHeight, alignment: .bottom)
                     .clipped()
-                    .transition(.opacity)
             } else {
                 StatusRowView(tab: tab)
                     .transition(.opacity)

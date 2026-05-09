@@ -279,6 +279,11 @@ struct SessionPaneView: View {
             // Restored to `defaultTitle` in `handleModeChange` when the
             // shell returns to its prompt.
             tab.title = trimmed.isEmpty ? tab.defaultTitle : trimmed
+            // Wipe the GridEmulator before the new command's output
+            // starts streaming. Without this, the previous command's
+            // grid state leaks into this block's render at finalize
+            // (e.g. `ls` output appearing at the top of `neofetch`).
+            tab.renderer.resetGrid()
             tab.shellBridge.send(command: cmd)
             // Quick one-shot recompute so commands taking >~50ms swap
             // into the live terminal surface without waiting a full
