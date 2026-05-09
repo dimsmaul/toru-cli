@@ -2,12 +2,14 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version label baked into the DMG filename (defaults to short SHA)."
+        description: "Version label baked into the DMG filename (defaults to short SHA). Manual runs do NOT publish a Release."
         required: false
         default: ""
 
@@ -19,52 +21,144 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # -----------------------------------------------------------------
+  # 1. Decide what version to build (and whether to build at all).
+  #
+  # Three real release flows:
+  #   • External tag push  → build + publish, version = tag name.
+  #   • Commit on `main` containing `release: <major|minor|patch>`
+  #     → bump latest semver tag, push the new tag, build + publish.
+  #   • workflow_dispatch  → artifact-only build (no Release row).
+  #
+  # Anything else on `main` (commits without the `release:` keyword)
+  # short-circuits this job with `version=""`, which makes the build
+  # job skip via `if: needs.prepare.outputs.version != ''`.
+  # -----------------------------------------------------------------
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version:    ${{ steps.compute.outputs.version }}
+      is_release: ${{ steps.compute.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version + maybe push new tag
+        id: compute
+        env:
+          EVENT_NAME:    ${{ github.event_name }}
+          REF:           ${{ github.ref }}
+          REF_NAME:      ${{ github.ref_name }}
+          COMMIT_MSG:    ${{ github.event.head_commit.message }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+
+          sanitize() { printf "%s" "$1" | tr -cd 'A-Za-z0-9._-'; }
+
+          # ---- Case 1: pushed tag --------------------------------------
+          if [[ "$EVENT_NAME" == "push" && "$REF" == refs/tags/* ]]; then
+            VERSION=$(sanitize "$REF_NAME")
+            echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+            echo "is_release=true"    >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ---- Case 2: workflow_dispatch -------------------------------
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            LABEL=$(sanitize "${INPUT_VERSION:-}")
+            [[ -n "$LABEL" ]] || LABEL="${GITHUB_SHA::7}"
+            echo "version=$LABEL"     >> "$GITHUB_OUTPUT"
+            echo "is_release=false"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ---- Case 3: push to main ------------------------------------
+          # Look for a `release: major|minor|patch` line in the commit
+          # message. Case-insensitive, may have leading whitespace.
+          BUMP=""
+          if   echo "$COMMIT_MSG" | grep -qiE '(^|[[:space:]])release:[[:space:]]*major'; then
+            BUMP=major
+          elif echo "$COMMIT_MSG" | grep -qiE '(^|[[:space:]])release:[[:space:]]*minor'; then
+            BUMP=minor
+          elif echo "$COMMIT_MSG" | grep -qiE '(^|[[:space:]])release:[[:space:]]*patch'; then
+            BUMP=patch
+          fi
+
+          if [[ -z "$BUMP" ]]; then
+            echo "No 'release: <major|minor|patch>' keyword in commit. Skipping."
+            echo "version="           >> "$GITHUB_OUTPUT"
+            echo "is_release=false"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Latest semver tag, fallback v0.0.0 if none.
+          LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1 || true)
+          [[ -n "$LATEST" ]] || LATEST="v0.0.0"
+          CUR="${LATEST#v}"
+          IFS='.' read -r MAJ MIN PAT <<<"$CUR"
+          MAJ=${MAJ:-0}; MIN=${MIN:-0}; PAT=${PAT:-0}
+          case "$BUMP" in
+            major) MAJ=$((MAJ + 1)); MIN=0; PAT=0;;
+            minor) MIN=$((MIN + 1)); PAT=0;;
+            patch) PAT=$((PAT + 1));;
+          esac
+          NEW="v${MAJ}.${MIN}.${PAT}"
+          echo "Bumping ${LATEST} → ${NEW}"
+
+          # Pushing with the default GITHUB_TOKEN does NOT cascade into a
+          # second workflow run (per GitHub's recursion guard), so the
+          # rest of THIS run will keep going via `needs: prepare` and
+          # build the new tag without firing a duplicate.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW"
+          git push origin "$NEW"
+
+          echo "version=$NEW"       >> "$GITHUB_OUTPUT"
+          echo "is_release=true"    >> "$GITHUB_OUTPUT"
+
+  # -----------------------------------------------------------------
+  # 2. Build the .app, sign ad-hoc, package as DMG.
+  #
+  # Skipped when `prepare` decided there was nothing to release
+  # (e.g. a normal commit on main without `release:` keyword).
+  # -----------------------------------------------------------------
   build:
     name: Build .app + DMG
+    needs: prepare
+    if: needs.prepare.outputs.version != ''
     # macos-15 needed: project's MACOSX_DEPLOYMENT_TARGET is 15.5, which
     # only ships in Xcode 16+ SDKs. macos-14 runners only have Xcode
     # 15.x and would fail with "macOS 15.5 SDK is not installed".
     runs-on: macos-15
 
+    outputs:
+      dmg_name: ${{ steps.dmg.outputs.name }}
+      version:  ${{ needs.prepare.outputs.version }}
+
     env:
       PROJECT: "Toru CLI.xcodeproj"
-      SCHEME: "Toru CLI"
-      CONFIG: Release
+      SCHEME:  "Toru CLI"
+      CONFIG:  Release
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # If `prepare` just pushed a new tag, the default checkout would
+          # land us on the older `main` SHA. Pin to the resolved version
+          # so the binary embeds the right tag's source.
+          ref: ${{ needs.prepare.outputs.version }}
 
       - name: Select Xcode
         run: |
-          # Pick the highest-versioned Xcode the runner ships, since the
-          # exact `Xcode_X.Y.app` path drifts as GitHub updates images.
           XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           [[ -n "$XCODE" ]] || XCODE=/Applications/Xcode.app
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
-
-      - name: Resolve version label
-        id: ver
-        env:
-          # Pulled out of `${{ }}` interpolation to avoid shell injection
-          # via workflow_dispatch input.
-          INPUT_VERSION: ${{ github.event.inputs.version }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          # Sanitize: strip anything that isn't a safe filename char.
-          sanitize() { printf "%s" "$1" | tr -cd 'A-Za-z0-9._-'; }
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            LABEL=$(sanitize "$REF_NAME")
-          elif [[ -n "${INPUT_VERSION:-}" ]]; then
-            LABEL=$(sanitize "$INPUT_VERSION")
-          else
-            LABEL="${GITHUB_SHA::7}"
-          fi
-          [[ -n "$LABEL" ]] || LABEL="${GITHUB_SHA::7}"
-          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: |
@@ -99,15 +193,12 @@ jobs:
             echo "::error::no .app produced"
             exit 1
           fi
-          echo "path=$APP" >> "$GITHUB_OUTPUT"
+          echo "path=$APP"             >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$APP" .app)" >> "$GITHUB_OUTPUT"
 
       - name: Ad-hoc codesign
         env:
           APP_PATH: ${{ steps.app.outputs.path }}
-        # No Apple Developer cert. Ad-hoc sign keeps the .app launchable;
-        # users right-click → Open the first time. Switch to a real cert +
-        # notarization once an Apple ID is wired in.
         run: codesign --force --deep --sign - "$APP_PATH"
 
       - name: Create DMG
@@ -115,7 +206,7 @@ jobs:
         env:
           APP_PATH: ${{ steps.app.outputs.path }}
           APP_NAME: ${{ steps.app.outputs.name }}
-          VERSION: ${{ steps.ver.outputs.label }}
+          VERSION:  ${{ needs.prepare.outputs.version }}
         run: |
           set -euxo pipefail
           SAFE="${APP_NAME// /-}"
@@ -139,10 +230,11 @@ jobs:
           path: ${{ steps.dmg.outputs.path }}
           if-no-files-found: error
 
-      - name: Publish GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish GitHub Release (releases only)
+        if: needs.prepare.outputs.is_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.version }}
           files: ${{ steps.dmg.outputs.path }}
           generate_release_notes: true
           draft: false
@@ -158,15 +250,15 @@ jobs:
       #   - Fine-grained PAT
       #   - Repository access: only `dimsmaul/homebrew-toru-cli`
       #   - Permissions: Contents → Read and write
-      - name: Bump Homebrew Cask (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Bump Homebrew Cask (releases only)
+        if: needs.prepare.outputs.is_release == 'true'
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          DMG_PATH: ${{ steps.dmg.outputs.path }}
-          VERSION: ${{ steps.ver.outputs.label }}
+          GH_TOKEN:   ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DMG_PATH:   ${{ steps.dmg.outputs.path }}
+          VERSION:    ${{ needs.prepare.outputs.version }}
           REPO_OWNER: dimsmaul
-          REPO_NAME: toru-cli
-          TAP_REPO: dimsmaul/homebrew-toru-cli
+          REPO_NAME:  toru-cli
+          TAP_REPO:   dimsmaul/homebrew-toru-cli
         run: |
           set -euo pipefail
 
@@ -176,8 +268,8 @@ jobs:
           fi
 
           SHA=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
-          # Cask `version` is the bare semver. The leading `v` belongs to
-          # the git tag and the URL, not the version string.
+          # Cask `version` is bare semver. Leading `v` belongs to the git
+          # tag and the URL, not the version string.
           VER_NUM="${VERSION#v}"
 
           TMP=$(mktemp -d)
@@ -186,9 +278,6 @@ jobs:
             "$TMP"
 
           mkdir -p "$TMP/Casks"
-          # Single-quoted heredoc keeps Ruby's `#{version}` literal so
-          # Homebrew interpolates it at install time. Bash variables are
-          # substituted via `sed` after.
           cat > "$TMP/Casks/toru-cli.rb" <<'RUBY'
           cask "toru-cli" do
             version "__VER__"
