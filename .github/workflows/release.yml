@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label baked into the DMG filename (defaults to short SHA)."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build .app + DMG
+    # macos-15 needed: project's MACOSX_DEPLOYMENT_TARGET is 15.5, which
+    # only ships in Xcode 16+ SDKs. macos-14 runners only have Xcode
+    # 15.x and would fail with "macOS 15.5 SDK is not installed".
+    runs-on: macos-15
+
+    env:
+      PROJECT: "Toru CLI.xcodeproj"
+      SCHEME: "Toru CLI"
+      CONFIG: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # Pick the highest-versioned Xcode the runner ships, since the
+          # exact `Xcode_X.Y.app` path drifts as GitHub updates images.
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [[ -n "$XCODE" ]] || XCODE=/Applications/Xcode.app
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Resolve version label
+        id: ver
+        env:
+          # Pulled out of `${{ }}` interpolation to avoid shell injection
+          # via workflow_dispatch input.
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Sanitize: strip anything that isn't a safe filename char.
+          sanitize() { printf "%s" "$1" | tr -cd 'A-Za-z0-9._-'; }
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            LABEL=$(sanitize "$REF_NAME")
+          elif [[ -n "${INPUT_VERSION:-}" ]]; then
+            LABEL=$(sanitize "$INPUT_VERSION")
+          else
+            LABEL="${GITHUB_SHA::7}"
+          fi
+          [[ -n "$LABEL" ]] || LABEL="${GITHUB_SHA::7}"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          # Force-clear signing identity AND development team. Project
+          # has CODE_SIGN_STYLE=Automatic + DEVELOPMENT_TEAM hard-coded
+          # which would try to talk to Apple from a team-less runner.
+          # Hardened runtime stays on (project default) so the binary
+          # is still launchable; ad-hoc sign happens in the next step.
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Locate built .app
+        id: app
+        run: |
+          set -euo pipefail
+          APP=$(find "build/dd/Build/Products/$CONFIG" -maxdepth 2 -name "*.app" -type d | head -1)
+          if [[ -z "$APP" ]]; then
+            echo "::error::no .app produced"
+            exit 1
+          fi
+          echo "path=$APP" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$APP" .app)" >> "$GITHUB_OUTPUT"
+
+      - name: Ad-hoc codesign
+        env:
+          APP_PATH: ${{ steps.app.outputs.path }}
+        # No Apple Developer cert. Ad-hoc sign keeps the .app launchable;
+        # users right-click → Open the first time. Switch to a real cert +
+        # notarization once an Apple ID is wired in.
+        run: codesign --force --deep --sign - "$APP_PATH"
+
+      - name: Create DMG
+        id: dmg
+        env:
+          APP_PATH: ${{ steps.app.outputs.path }}
+          APP_NAME: ${{ steps.app.outputs.name }}
+          VERSION: ${{ steps.ver.outputs.label }}
+        run: |
+          set -euxo pipefail
+          SAFE="${APP_NAME// /-}"
+          DMG="${SAFE}-${VERSION}.dmg"
+          STAGE=$(mktemp -d)
+          cp -R "$APP_PATH" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "$APP_NAME" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "$DMG"
+          rm -rf "$STAGE"
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "name=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dmg.outputs.name }}
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.dmg.outputs.path }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
