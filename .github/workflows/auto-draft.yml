@@ -1,0 +1,19 @@
+name: Auto Draft PR
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  draft:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    environment: claude-code
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Convert to Draft
+        env:
+          MY_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: |
+          curl -s -X POST -H "Authorization: bearer $MY_TOKEN" -H "Content-Type: application/json" -d '{"query": "mutation { convertPullRequestToDraft(input: {pullRequestId: \"${{ github.event.pull_request.node_id }}\"}) { pullRequest { id } } }"}' https://api.github.com/graphql
