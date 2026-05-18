@@ -1,0 +1,106 @@
+name: Claude Manual Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to review'
+        required: true
+        type: string
+      prompt:
+        description: 'Review instruction for Claude'
+        required: false
+        default: 'Review the codebase. Focus on code quality, security, and best practices.'
+        type: string
+
+jobs:
+  review:
+    runs-on: self-hosted
+    environment: claude-code
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 1
+
+      - name: Inject Dynamic Framework Skill
+        run: |
+          FRAMEWORK="generic"
+          if [ -f pubspec.yaml ]; then
+            FRAMEWORK="flutter"
+          elif [ -f go.mod ]; then
+            FRAMEWORK="golang"
+          elif [ -f package.json ]; then
+            if grep -q '"react-native"' package.json 2>/dev/null || grep -q "'react-native'" package.json 2>/dev/null; then
+              FRAMEWORK="react-native"
+            elif grep -q '"react"' package.json 2>/dev/null || grep -q "'react'" package.json 2>/dev/null; then
+              FRAMEWORK="react"
+            else
+              FRAMEWORK="node"
+            fi
+          elif find . -maxdepth 3 -name "*.kt" -print -quit | grep -q .; then
+            FRAMEWORK="kotlin"
+          elif find . -maxdepth 3 -name "*.swift" -print -quit | grep -q .; then
+            FRAMEWORK="ios-swift"
+          fi
+          echo "Detected framework: $FRAMEWORK"
+
+          SYSTEM_PROMPT=""
+
+          CAVEMAN=$(curl -sf "http://localhost:8080/skills/caveman/SKILL.md" 2>/dev/null) || true
+          if [ -n "$CAVEMAN" ]; then
+            echo "Caveman rules fetched"
+            SYSTEM_PROMPT="$CAVEMAN"
+          fi
+
+          FRAMEWORK_SKILL=$(curl -sf "http://localhost:8080/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
+          if [ -n "$FRAMEWORK_SKILL" ]; then
+            echo "Framework skill fetched for: $FRAMEWORK"
+            SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${FRAMEWORK_SKILL}"
+          else
+            echo "No framework skill available for $FRAMEWORK, skipping"
+          fi
+
+          LAPORAN=$(curl -sf "http://localhost:8080/skills/laporan/SKILL.md" 2>/dev/null) || true
+          if [ -n "$LAPORAN" ]; then
+            echo "Laporan rules fetched"
+            SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${LAPORAN}"
+          fi
+
+          if [ -n "$SYSTEM_PROMPT" ]; then
+            echo "APPEND_SYSTEM_PROMPT<<EOF" >> $GITHUB_ENV
+            echo "$SYSTEM_PROMPT" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            echo "APPEND_SYSTEM_PROMPT set"
+          fi
+
+      - name: Run Claude Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            ${{ inputs.prompt }}
+
+            After completing the review, create a GitHub issue in this repository using the `gh` CLI.
+            Issue title: "[Claude Review] ${{ inputs.branch }}"
+            Label the issue with "claude-review" (create the label first if it doesn't exist: `gh label create claude-review --color 0E8A16 --description "Automated Claude review report" 2>/dev/null || true`).
+            The issue body must be a single consolidated report in markdown format.
+          claude_args: '--allowed-tools "Glob,Grep,LS,Read,Bash"'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          APPEND_SYSTEM_PROMPT: ${{ env.APPEND_SYSTEM_PROMPT }}
+
+      - name: Notify Completion
+        if: always()
+        env:
+          CLAUDE_DONE_SECRET: ${{ secrets.CLAUDE_DONE_SECRET }}
+        run: |
+          curl -sf -X POST "http://localhost:8080/webhook/manual-review-done" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
+            -d "{\"repo\":\"${{ github.repository }}\",\"branch\":\"${{ inputs.branch }}\",\"status\":\"${{ job.status }}\",\"run_id\":${{ github.run_id }}}"
