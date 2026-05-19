@@ -27,10 +27,19 @@ final class SessionMonitor: ObservableObject {
 
     private init() {}
 
-    /// Hand off the PID of the running shell. Idempotent.
+    /// Hand off the PID of the running shell. Idempotent for same pid;
+    /// re-attach with a different pid resets observed state so the chips
+    /// don't briefly display stale values from a different tab's shell.
     func attach(pid: pid_t) {
-        guard pid > 0, pid != shellPid else { return }
+        guard pid > 0 else { return }
+        if pid == shellPid { return }
         shellPid = pid
+        lastPolledCwd = ""
+        cwd = NSHomeDirectory()
+        runtime = ""
+        branch = ""
+        dirty = false
+        inflightDetect?.cancel()
         startPolling()
         poll()
     }
@@ -140,6 +149,8 @@ final class SessionMonitor: ObservableObject {
             if let v = await run("ruby --version", cwd: cwd) { return formatRuby(v) }
         } else if exists("composer.json") {
             if let v = await run("php --version", cwd: cwd) { return formatPHP(v) }
+        } else if exists("mix.exs") {
+            if let v = await run("elixir --version", cwd: cwd) { return formatElixir(v) }
         }
         if let v = await run("node --version", cwd: cwd) { return formatNode(v) }
         return ""
@@ -160,9 +171,16 @@ final class SessionMonitor: ObservableObject {
             let outPipe = Pipe(); let errPipe = Pipe()
             proc.standardOutput = outPipe; proc.standardError = errPipe
             do { try proc.run() } catch { return nil }
+            // Drain stdout BEFORE waitUntilExit. Pipe buffer is ~16-64 KB;
+            // if the child writes more than that, it blocks on write() and
+            // waitUntilExit() blocks on the never-exiting child = deadlock
+            // (zombie zsh per 0.6s tick on repos with many dirty files).
+            // readDataToEndOfFile already blocks until EOF (child exit), so
+            // waitUntilExit afterwards is the cheap call.
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            _ = errPipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            guard let s = String(data: data, encoding: .utf8) else { return nil }
+            guard let s = String(data: outData, encoding: .utf8) else { return nil }
             let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }.value
@@ -198,5 +216,15 @@ final class SessionMonitor: ObservableObject {
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { return "" }
         return "php \(parts[1])"
+    }
+    private static func formatElixir(_ s: String) -> String {
+        // "Erlang/OTP 26 ... \nElixir 1.16.0 (...)"
+        for line in s.split(separator: "\n") {
+            if line.hasPrefix("Elixir") {
+                let parts = line.split(separator: " ")
+                if parts.count >= 2 { return "elixir \(parts[1])" }
+            }
+        }
+        return ""
     }
 }
