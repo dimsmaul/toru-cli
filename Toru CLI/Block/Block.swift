@@ -142,17 +142,4 @@ final class BlockStore: ObservableObject {
     }
 
     func clear() { clearAll() }
-
-    /// Marker block ("─── session resumed ───" after fullTUI exit).
-    /// Stored as plain attributed string with no styling.
-    func appendMarker(_ text: String) {
-        var styled = AttributedString(text)
-        styled.foregroundColor = .secondary
-        let m = Block(command: text,
-                      output: AttributedString(),
-                      isRunning: false,
-                      startCursorRow: 0)
-        blocks.append(m)
-        _ = styled
-    }
 }

@@ -15,7 +15,6 @@ final class TorTerminalView: LocalProcessTerminalView {
     private let sessionId: String = UUID().uuidString
     private var lineBuffer: String = ""
     private let autocomplete = AutocompleteEngine()
-    private let tabCompleter = TabCompleter()
     private let history = HistoryDatabase.shared
     private let ghost = GhostTextOverlay()
     private var currentTheme: Theme = ThemeManager.shared.current
@@ -46,7 +45,6 @@ final class TorTerminalView: LocalProcessTerminalView {
         applyTheme(currentTheme)
         addSubview(ghost)
         ghost.isHidden = true
-        tabCompleter.warmUp()
         configureFont()
         installKeyMonitor()
     }
@@ -94,11 +92,6 @@ final class TorTerminalView: LocalProcessTerminalView {
             }
         }
 
-        // (Previously: sent ^L 250ms after spawn to wipe the cosmetic
-        // "zsh: can't set tty pgrp" line. Removed — with ZLE off the ^L
-        // ends up prepended to the first command in zsh's line buffer.
-        // The tty-pgrp warning is now filtered out by AnsiStripper's
-        // line-level pass instead.)
     }
 
     // MARK: - Theme

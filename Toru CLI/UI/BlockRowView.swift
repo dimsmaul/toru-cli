@@ -192,11 +192,6 @@ struct BlockRowView: View {
         commandFailed ? Color.red.opacity(0.9) : Color.primary
     }
 
-    private var borderColor: Color {
-        if block.isRunning && isLocked { return Color.orange.opacity(0.4) }
-        return Color.white.opacity(0.06)
-    }
-
     // MARK: - Search highlight
 
     private var highlightedCommand: AttributedString {
@@ -240,35 +235,5 @@ struct BlockRowView: View {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(s, forType: .string)
-    }
-
-    private func preserveColumnPadding(_ s: String) -> String {
-        var out = ""
-        out.reserveCapacity(s.count)
-        var run = 0
-        for c in s {
-            if c == " " {
-                run += 1
-            } else {
-                flushSpaces(run, into: &out)
-                run = 0
-                if c == "\t" {
-                    out.append(String(repeating: "\u{00A0}", count: 4))
-                } else {
-                    out.append(c)
-                }
-            }
-        }
-        flushSpaces(run, into: &out)
-        return out
-    }
-
-    private func flushSpaces(_ run: Int, into out: inout String) {
-        if run <= 0 { return }
-        if run == 1 {
-            out.append(" ")
-        } else {
-            out.append(String(repeating: "\u{00A0}", count: run))
-        }
     }
 }

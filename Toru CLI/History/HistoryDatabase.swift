@@ -4,15 +4,33 @@ import GRDB
 final class HistoryDatabase {
     static let shared: HistoryDatabase = {
         do { return try HistoryDatabase(url: HistoryDatabase.defaultURL()) }
-        catch { return try! HistoryDatabase.inMemory() }
+        catch let diskErr {
+            NSLog("[HistoryDatabase] disk init failed: \(diskErr); falling back to in-memory")
+            do { return try HistoryDatabase.inMemory() }
+            catch let memErr {
+                NSLog("[HistoryDatabase] in-memory init also failed: \(memErr); history will not persist this session")
+                return HistoryDatabase.disabled()
+            }
+        }
     }()
 
-    private let queue: DatabaseQueue
+    private let queue: DatabaseQueue?
     private var lastInsertedCommand: String?
 
     init(queue: DatabaseQueue) throws {
         self.queue = queue
         try Self.migrator.migrate(queue)
+    }
+
+    /// No-op fallback used when both the on-disk and in-memory DB init
+    /// failed. Methods return empty results so the app keeps running
+    /// without history persistence rather than trapping at startup.
+    private init(disabled: Void) {
+        self.queue = nil
+    }
+
+    static func disabled() -> HistoryDatabase {
+        HistoryDatabase(disabled: ())
     }
 
     convenience init(url: URL) throws {
@@ -56,6 +74,7 @@ final class HistoryDatabase {
     /// Insert with dedup rules: skip if same as previous, leading-space, or empty.
     @discardableResult
     func record(rawInput: String, executed command: String, directory: String, exitCode: Int = 0, sessionId: String) -> Bool {
+        guard let queue else { return false }
         let trimmed = command.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return false }
         if rawInput.hasPrefix(" ") { return false }
@@ -83,6 +102,7 @@ final class HistoryDatabase {
     /// `prefix`. Empty prefix returns all distinct commands. Used by the
     /// input bar's up/down arrow navigation (Warp-style prefix recall).
     func recentMatching(prefix: String, limit: Int = 100) -> [String] {
+        guard let queue else { return [] }
         let pattern = prefix.isEmpty ? "%" : "\(escapeLike(prefix))%"
         return (try? queue.read { db in
             try String.fetchAll(db, sql: """
@@ -99,6 +119,7 @@ final class HistoryDatabase {
     }
 
     func mostRecentMatching(prefix: String) -> String? {
+        guard let queue else { return nil }
         guard !prefix.isEmpty else { return nil }
         return (try? queue.read { db in
             try CommandHistory
@@ -111,6 +132,7 @@ final class HistoryDatabase {
     }
 
     func search(query: String, limit: Int = 8) -> [CommandHistory] {
+        guard let queue else { return [] }
         guard !query.isEmpty else { return [] }
         let pattern = "%\(escapeLike(query))%"
         return (try? queue.read { db in
@@ -123,7 +145,8 @@ final class HistoryDatabase {
     }
 
     func recent(limit: Int = 100) -> [CommandHistory] {
-        (try? queue.read { db in
+        guard let queue else { return [] }
+        return (try? queue.read { db in
             try CommandHistory
                 .order(Column("executedAt").desc)
                 .limit(limit)
@@ -132,6 +155,7 @@ final class HistoryDatabase {
     }
 
     func clear() {
+        guard let queue else { lastInsertedCommand = nil; return }
         _ = try? queue.write { db in
             try CommandHistory.deleteAll(db)
         }
