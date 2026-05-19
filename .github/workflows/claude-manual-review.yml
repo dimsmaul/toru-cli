@@ -12,6 +12,10 @@ on:
         required: false
         default: 'Review the codebase. Focus on code quality, security, and best practices.'
         type: string
+      review_run_id:
+        description: 'Internal review_run UUID from the code-review service'
+        required: false
+        type: string
 
 jobs:
   review:
@@ -26,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
-          fetch-depth: 1
+          fetch-depth: 20
 
       - name: Inject Dynamic Framework Skill
         run: |
@@ -80,6 +84,7 @@ jobs:
           fi
 
       - name: Run Claude Review
+        id: claude_review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -95,12 +100,76 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           APPEND_SYSTEM_PROMPT: ${{ env.APPEND_SYSTEM_PROMPT }}
 
+      - name: Resolve issue metadata
+        id: issue_meta
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: |
+          # claude-code-action creates a GitHub issue for workflow_dispatch
+          # reviews (no PR context = no PR comment). We capture the issue
+          # NUMBER (small int from URL like /issues/8 → 8) so BE can fetch
+          # the body via /repos/{owner}/{repo}/issues/{number}.
+          ISSUE_URL=$(gh issue list --label "claude-review" --state open --json url,title \
+            --jq '[.[] | select(.title | startswith("[Claude Review] ${{ inputs.branch }}"))] | first | .url' 2>/dev/null || true)
+
+          ISSUE_NUMBER=""
+          if [ -n "$ISSUE_URL" ]; then
+            ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+          fi
+
+          echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
+          echo "issue_url=${ISSUE_URL}" >> $GITHUB_OUTPUT
+
       - name: Notify Completion
         if: always()
         env:
           CLAUDE_DONE_SECRET: ${{ secrets.CLAUDE_DONE_SECRET }}
         run: |
+          set +e
+          ISSUE_NUMBER="${{ steps.issue_meta.outputs.issue_number }}"
+          ISSUE_URL="${{ steps.issue_meta.outputs.issue_url }}"
+          REVIEW_RUN_ID="${{ inputs.review_run_id }}"
+
+          # Capture commits inline. Use tab separator (git strips tabs from
+          # subject lines). Default to [] if git/jq fail (missing on runner,
+          # detached checkout, etc.) so payload always parses.
+          COMMITS_TSV=$(git log -5 --pretty=format:'%h%x09%s%x09%an' 2>/dev/null || true)
+          if [ -z "$COMMITS_TSV" ]; then
+            COMMITS_JSON="[]"
+          else
+            COMMITS_JSON=$(printf '%s' "$COMMITS_TSV" \
+              | jq -Rn '[inputs | split("\t") | select(length >= 3) | {sha: .[0], message: .[1], author: .[2]}]' 2>/dev/null \
+              || echo '[]')
+            if [ -z "$COMMITS_JSON" ]; then COMMITS_JSON="[]"; fi
+          fi
+          echo "commits payload: $COMMITS_JSON"
+
+          jq -n \
+            --arg review_run_id "$REVIEW_RUN_ID" \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ inputs.branch }}" \
+            --arg status "${{ job.status }}" \
+            --argjson run_id ${{ github.run_id }} \
+            --argjson build_number ${{ github.run_number }} \
+            --arg issue_number "$ISSUE_NUMBER" \
+            --arg issue_url "$ISSUE_URL" \
+            --argjson commits "$COMMITS_JSON" \
+            '{
+              review_run_id: $review_run_id,
+              repo: $repo,
+              branch: $branch,
+              status: $status,
+              run_id: $run_id,
+              build_number: $build_number,
+              commits: $commits,
+              pr_number: ($issue_number | if . == "" then null else tonumber end),
+              pr_comment_url: ($issue_url | if . == "" then null else . end)
+            }' > /tmp/payload.json
+
+          cat /tmp/payload.json
+
           curl -sf -X POST "http://localhost:8080/webhook/manual-review-done" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
-            -d "{\"repo\":\"${{ github.repository }}\",\"branch\":\"${{ inputs.branch }}\",\"status\":\"${{ job.status }}\",\"run_id\":${{ github.run_id }}}"
+            -d @/tmp/payload.json
