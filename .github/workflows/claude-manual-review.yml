@@ -130,11 +130,29 @@ jobs:
         if: always()
         env:
           CLAUDE_DONE_SECRET: ${{ secrets.CLAUDE_DONE_SECRET }}
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
         run: |
           set +e
           ISSUE_NUMBER="${{ steps.issue_meta.outputs.issue_number }}"
           ISSUE_URL="${{ steps.issue_meta.outputs.issue_url }}"
           REVIEW_RUN_ID="${{ inputs.review_run_id }}"
+
+          # Extract verdict from the issue body Claude posted. Looks for the
+          # mandatory "Verdict: <value>" line (case-insensitive). Falls back
+          # to empty string — BE will default to "approve" if empty, but we
+          # want the real verdict for "request changes" / "needs work".
+          VERDICT=""
+          if [ -n "$ISSUE_NUMBER" ]; then
+            BODY=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' 2>/dev/null || true)
+            VERDICT_RAW=$(printf '%s' "$BODY" | grep -iE '^Verdict:' | head -1 | sed -E 's/^[Vv]erdict:[[:space:]]*//' | tr -d '\r')
+            VERDICT_LOWER=$(printf '%s' "$VERDICT_RAW" | tr '[:upper:]' '[:lower:]' | xargs)
+            case "$VERDICT_LOWER" in
+              approve|"can merge"|lgtm) VERDICT="approve" ;;
+              "needs work"|"needs_work"|needs*work*) VERDICT="needs_work" ;;
+              "request change"|"request changes"|change_request|request*change*) VERDICT="change_request" ;;
+            esac
+            echo "extracted verdict raw='$VERDICT_RAW' normalized='$VERDICT'"
+          fi
 
           # Capture commits inline. Use tab separator (git strips tabs from
           # subject lines). Default to [] if git/jq fail (missing on runner,
@@ -155,6 +173,7 @@ jobs:
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ inputs.branch }}" \
             --arg status "${{ job.status }}" \
+            --arg verdict "$VERDICT" \
             --argjson run_id ${{ github.run_id }} \
             --argjson build_number ${{ github.run_number }} \
             --arg issue_number "$ISSUE_NUMBER" \
@@ -165,6 +184,7 @@ jobs:
               repo: $repo,
               branch: $branch,
               status: $status,
+              verdict: $verdict,
               run_id: $run_id,
               build_number: $build_number,
               commits: $commits,
