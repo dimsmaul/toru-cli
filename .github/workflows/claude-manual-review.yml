@@ -61,13 +61,13 @@ jobs:
 
           SYSTEM_PROMPT=""
 
-          CAVEMAN=$(curl -sf "http://localhost:8080/skills/caveman/SKILL.md" 2>/dev/null) || true
+          CAVEMAN=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
           if [ -n "$CAVEMAN" ]; then
             echo "Caveman rules fetched"
             SYSTEM_PROMPT="$CAVEMAN"
           fi
 
-          FRAMEWORK_SKILL=$(curl -sf "http://localhost:8080/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
+          FRAMEWORK_SKILL=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
           if [ -n "$FRAMEWORK_SKILL" ]; then
             echo "Framework skill fetched for: $FRAMEWORK"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${FRAMEWORK_SKILL}"
@@ -75,7 +75,7 @@ jobs:
             echo "No framework skill available for $FRAMEWORK, skipping"
           fi
 
-          LAPORAN=$(curl -sf "http://localhost:8080/skills/laporan/SKILL.md" 2>/dev/null) || true
+          LAPORAN=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
           if [ -n "$LAPORAN" ]; then
             echo "Laporan rules fetched"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${LAPORAN}"
@@ -194,7 +194,7 @@ jobs:
 
           cat /tmp/payload.json
 
-          curl -sf -X POST "http://localhost:8080/webhook/manual-review-done" \
+          curl -sf -X POST "https://using-birds-vertex-weed.trycloudflare.com/webhook/manual-review-done" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
             -d @/tmp/payload.json
