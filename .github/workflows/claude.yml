@@ -15,22 +15,22 @@ jobs:
     if: |
       (
         github.event_name == 'issue_comment' &&
-        contains(github.event.comment.body, '@claude') &&
+        contains(github.event.comment.body, '@claude review once') &&
         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@claude') &&
+        contains(github.event.comment.body, '@claude review once') &&
         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@claude') &&
+        contains(github.event.review.body, '@claude review once') &&
         (github.event.review.author_association == 'OWNER' || github.event.review.author_association == 'MEMBER' || github.event.review.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'issues' &&
-        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        (contains(github.event.issue.body, '@claude review once') || contains(github.event.issue.title, '@claude review once')) &&
         (github.event.issue.author_association == 'OWNER' || github.event.issue.author_association == 'MEMBER' || github.event.issue.author_association == 'COLLABORATOR')
       )
     runs-on: self-hosted
@@ -76,14 +76,14 @@ jobs:
           SYSTEM_PROMPT=""
 
           # Fetch caveman rules from backend
-          CAVEMAN=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
+          CAVEMAN=$(curl -sf "https://trusted-spa-program-mutual.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
           if [ -n "$CAVEMAN" ]; then
             echo "Caveman rules fetched"
             SYSTEM_PROMPT="$CAVEMAN"
           fi
 
           # Fetch framework skill from backend
-          FRAMEWORK_SKILL=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
+          FRAMEWORK_SKILL=$(curl -sf "https://trusted-spa-program-mutual.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
           if [ -n "$FRAMEWORK_SKILL" ]; then
             echo "Framework skill fetched for: $FRAMEWORK"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${FRAMEWORK_SKILL}"
@@ -92,7 +92,7 @@ jobs:
           fi
 
           # Fetch laporan rules from backend
-          LAPORAN=$(curl -sf "https://using-birds-vertex-weed.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
+          LAPORAN=$(curl -sf "https://trusted-spa-program-mutual.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
           if [ -n "$LAPORAN" ]; then
             echo "Laporan rules fetched"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${LAPORAN}"
@@ -115,6 +115,18 @@ jobs:
           additional_permissions: |
             actions: read
 
+          # Auto-review prompt for pull_request events (no comment body available).
+          # For issue_comment events, the comment body is used as prompt automatically.
+          prompt: ${{ github.event_name == 'pull_request' && '@claude review once' || '' }}
+
+          # Use sticky comment so review output is posted as a PR comment.
+          # Without this, pull_request-triggered reviews have no parent comment
+          # to reply to and the review output is lost.
+          use_sticky_comment: true
+
+          # Enable full output for debugging review issues.
+          show_full_output: true
+
           # Optional: Add claude_args to customize behavior and configuration
           # We MUST include the default MCP tools (Read, Glob, LS, mcp__github_comment...)
           # otherwise they get overridden and Claude cannot post the review comment.
@@ -124,6 +136,7 @@ jobs:
           APPEND_SYSTEM_PROMPT: ${{ env.APPEND_SYSTEM_PROMPT }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SECURITY_API_TOKEN: ${{ secrets.SECURITY_API_TOKEN }}
 
       - name: Post-Review Actions (Discord Notify)
         if: always()
@@ -140,11 +153,12 @@ jobs:
           fi
 
           # Notify PR service → triggers Discord notification (service handles draft→ready based on verdict)
-          echo "Notifying PR service..."
-          curl -sf -X POST "https://using-birds-vertex-weed.trycloudflare.com/webhook/claude-done" \
+          JOB_STATUS="${{ job.status }}"
+          echo "Notifying PR service... (status=$JOB_STATUS)"
+          curl -sf -X POST "https://trusted-spa-program-mutual.trycloudflare.com/webhook/claude-done" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
-            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER}" \
+            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER,\"status\":\"$JOB_STATUS\"}" \
             && echo "Service notified successfully" \
             || echo "Service notification failed (non-fatal)"
 
