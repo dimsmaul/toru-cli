@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       prompt:
-        description: 'Review instruction for Claude'
+        description: 'Review instruction for Claude (single-type / legacy fallback)'
         required: false
         default: 'Review the codebase. Focus on code quality, security, and best practices.'
         type: string
@@ -17,15 +17,77 @@ on:
         required: false
         type: string
       review_type_label:
-        description: 'Display label for the review type (e.g. Quality Gate, Security Review)'
+        description: 'Display label for the review type (single-type / legacy fallback)'
         required: false
         default: 'Manual Review'
         type: string
+      # review_types: comma-separated machine keys (e.g. "quality,security").
+      # Single-type backward compat: BE always populates prompt/review_type_label
+      # with the first type, so an older single-type workflow still installed on
+      # the repo keeps working unchanged.
+      review_types:
+        description: 'Comma-separated review type keys'
+        required: false
+        default: ''
+        type: string
+      # review_specs: JSON array of {type,label,prompt}, one entry per requested
+      # review type. Drives the per-type matrix below.
+      review_specs:
+        description: 'JSON array of per-type review specs'
+        required: false
+        default: ''
+        type: string
 
 jobs:
+  # ── Fan out: build the per-type matrix from review_specs ─────────────────────
+  # If review_specs is empty (legacy single-type dispatch), synthesize a single
+  # spec from prompt + review_type_label so the matrix always has >= 1 entry.
+  prepare:
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: build
+        env:
+          REVIEW_SPECS: ${{ inputs.review_specs }}
+          FALLBACK_PROMPT: ${{ inputs.prompt }}
+          FALLBACK_LABEL: ${{ inputs.review_type_label }}
+        run: |
+          set -e
+          if [ -n "$REVIEW_SPECS" ]; then
+            # Validate it parses as a non-empty array; else fall back.
+            COUNT=$(printf '%s' "$REVIEW_SPECS" | jq 'length' 2>/dev/null || echo 0)
+          else
+            COUNT=0
+          fi
+
+          if [ "$COUNT" -ge 1 ]; then
+            MATRIX=$(printf '%s' "$REVIEW_SPECS" | jq -c '{include: .}')
+          else
+            # Legacy single-type fallback.
+            MATRIX=$(jq -cn \
+              --arg label "$FALLBACK_LABEL" \
+              --arg prompt "$FALLBACK_PROMPT" \
+              '{include: [{type: "manual", label: $label, prompt: $prompt}]}')
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "matrix: $MATRIX"
+
+  # ── One review per type ─────────────────────────────────────────────────────
+  # max-parallel: 1 keeps GH-side load bounded and avoids concurrent gh issue
+  # races. Each matrix job posts its OWN issue + reports its OWN single output
+  # via the outputs[] callback. BE dedupes inserts by (review_run_id, comment_id)
+  # and UpdateStatus only flips the run terminal once, so multiple jobs hitting
+  # the callback is safe.
   review:
+    needs: prepare
     runs-on: self-hosted
     environment: claude-code
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     permissions:
       contents: read
       issues: write
@@ -94,8 +156,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           model: claude-opus-4-6
+          # matrix.prompt is this type's prompt (or the legacy fallback prompt).
           prompt: |
-            ${{ inputs.prompt }}
+            ${{ matrix.prompt }}
 
             PENTING: Ikuti semua instruksi dari APPEND_SYSTEM_PROMPT (system prompt tambahan) jika tersedia.
             Ini termasuk format laporan, verdict, issue management (buat GitHub issue per temuan High/Critical),
@@ -104,7 +167,7 @@ jobs:
             Gunakan PR_NUMBER sebagai referensi nomor review (bukan PR asli, tapi nomor identifikasi review).
 
             Setelah review selesai, buat GitHub issue konsolidasi di repository ini menggunakan `gh` CLI.
-            Issue title: "[Claude Review] ${{ inputs.branch }} - ${{ inputs.review_type_label }}"
+            Issue title: "[Claude Review] ${{ inputs.branch }} - ${{ matrix.label }}"
             Label issue dengan "claude-review" (buat label dulu jika belum ada: `gh label create claude-review --color 0E8A16 --description "Automated Claude review report" 2>/dev/null || true`).
             Issue body harus berupa laporan lengkap dalam format markdown sesuai instruksi system prompt.
           claude_args: '--allowed-tools "Glob,Grep,LS,Read,Bash"'
@@ -121,12 +184,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
         run: |
-          # claude-code-action creates a GitHub issue for workflow_dispatch
-          # reviews (no PR context = no PR comment). We capture the issue
-          # NUMBER (small int from URL like /issues/8 → 8) so BE can fetch
-          # the body via /repos/{owner}/{repo}/issues/{number}.
+          # claude-code-action creates a GitHub issue per review (no PR context).
+          # We match the issue for THIS type by its title (branch + label) so the
+          # matrix jobs don't pick up each other's issues. Capture the issue
+          # NUMBER so BE can fetch the body via /repos/{owner}/{repo}/issues/{n}.
           ISSUE_URL=$(gh issue list --label "claude-review" --state open --json url,title \
-            --jq '[.[] | select(.title | startswith("[Claude Review] ${{ inputs.branch }} - ${{ inputs.review_type_label }}"))] | first | .url' 2>/dev/null || true)
+            --jq '[.[] | select(.title | startswith("[Claude Review] ${{ inputs.branch }} - ${{ matrix.label }}"))] | first | .url' 2>/dev/null || true)
 
           ISSUE_NUMBER=""
           if [ -n "$ISSUE_URL" ]; then
@@ -137,20 +200,21 @@ jobs:
           echo "issue_url=${ISSUE_URL}" >> $GITHUB_OUTPUT
 
       - name: Notify Completion
+        # always() so a failed/cancelled review step still reports back — the
+        # lost callback (curl exit 6 etc.) was the original stuck-row cause.
         if: always()
         env:
           CLAUDE_DONE_SECRET: ${{ secrets.CLAUDE_DONE_SECRET }}
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          REVIEW_TYPE: ${{ matrix.type }}
         run: |
           set +e
           ISSUE_NUMBER="${{ steps.issue_meta.outputs.issue_number }}"
           ISSUE_URL="${{ steps.issue_meta.outputs.issue_url }}"
           REVIEW_RUN_ID="${{ inputs.review_run_id }}"
 
-          # Extract verdict from the issue body Claude posted. Looks for the
-          # mandatory "Verdict: <value>" line (case-insensitive). Falls back
-          # to empty string — BE will default to "approve" if empty, but we
-          # want the real verdict for "request changes" / "needs work".
+          # Extract verdict from the issue body Claude posted for THIS type.
+          # Looks for the mandatory "Verdict: <value>" line (case-insensitive).
           VERDICT=""
           if [ -n "$ISSUE_NUMBER" ]; then
             BODY=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' 2>/dev/null || true)
@@ -164,9 +228,7 @@ jobs:
             echo "extracted verdict raw='$VERDICT_RAW' normalized='$VERDICT'"
           fi
 
-          # Capture commits inline. Use tab separator (git strips tabs from
-          # subject lines). Default to [] if git/jq fail (missing on runner,
-          # detached checkout, etc.) so payload always parses.
+          # Capture commits inline (tab separator — git strips tabs from subjects).
           COMMITS_TSV=$(git log -5 --pretty=format:'%h%x09%s%x09%an' 2>/dev/null || true)
           if [ -z "$COMMITS_TSV" ]; then
             COMMITS_JSON="[]"
@@ -178,12 +240,18 @@ jobs:
           fi
           echo "commits payload: $COMMITS_JSON"
 
+          # Build the single-entry outputs[] array for THIS type. BE inserts one
+          # review_run_outputs row per entry (deduped by comment_id). pr_number /
+          # pr_comment_url stay at top level for backward compat.
+          ISSUE_NUM_JSON=$([ -z "$ISSUE_NUMBER" ] && echo "null" || echo "$ISSUE_NUMBER")
+
           jq -n \
             --arg review_run_id "$REVIEW_RUN_ID" \
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ inputs.branch }}" \
             --arg status "${{ job.status }}" \
             --arg verdict "$VERDICT" \
+            --arg review_type "$REVIEW_TYPE" \
             --argjson run_id ${{ github.run_id }} \
             --argjson build_number ${{ github.run_number }} \
             --arg issue_number "$ISSUE_NUMBER" \
@@ -199,12 +267,30 @@ jobs:
               build_number: $build_number,
               commits: $commits,
               pr_number: ($issue_number | if . == "" then null else tonumber end),
-              pr_comment_url: ($issue_url | if . == "" then null else . end)
+              pr_comment_url: ($issue_url | if . == "" then null else . end),
+              outputs: [
+                {
+                  review_type: $review_type,
+                  verdict: $verdict,
+                  status: $status,
+                  comment_url: ($issue_url | if . == "" then null else . end),
+                  comment_id: null
+                }
+              ]
             }' > /tmp/payload.json
 
           cat /tmp/payload.json
 
-          curl -sf -X POST "https://separately-modify-postal-therapeutic.trycloudflare.com/webhook/manual-review-done" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
-            -d @/tmp/payload.json
+          # Retry up to 3x with backoff so a transient network failure (the
+          # original exit-6 stuck-row bug) doesn't lose the result.
+          ATTEMPT=1
+          MAX=3
+          while [ "$ATTEMPT" -le "$MAX" ]; do
+            curl -sf -X POST "https://separately-modify-postal-therapeutic.trycloudflare.com/webhook/manual-review-done" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
+              -d @/tmp/payload.json && { echo "callback ok (attempt $ATTEMPT)"; break; }
+            echo "callback failed (attempt $ATTEMPT/$MAX), retrying..."
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 5
+          done
