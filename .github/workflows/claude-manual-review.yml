@@ -74,6 +74,22 @@ jobs:
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "matrix: $MATRIX"
 
+      - name: Report run started
+        env:
+          CLAUDE_DONE_SECRET: ${{ secrets.CLAUDE_DONE_SECRET }}
+          REVIEW_RUN_ID: ${{ inputs.review_run_id }}
+        run: |
+          # Report github.run_id to the backend so reconcile can match this run
+          # EXACTLY later (workflow_dispatch never returns the run id to the
+          # caller). Non-fatal — never block the review on this.
+          if [ -n "$REVIEW_RUN_ID" ]; then
+            curl -sf -X POST "https://separately-modify-postal-therapeutic.trycloudflare.com/webhook/review-started" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
+              -d "$(jq -cn --arg id "$REVIEW_RUN_ID" --argjson run_id ${{ github.run_id }} '{review_run_id: $id, github_run_id: $run_id}')" \
+              || echo "review-started callback failed (non-fatal)"
+          fi
+
   # ── One review per type ─────────────────────────────────────────────────────
   # max-parallel: 1 keeps GH-side load bounded and avoids concurrent gh issue
   # races. Each matrix job posts its OWN issue + reports its OWN single output
