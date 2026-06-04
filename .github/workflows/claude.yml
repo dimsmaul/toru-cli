@@ -76,14 +76,14 @@ jobs:
           SYSTEM_PROMPT=""
 
           # Fetch caveman rules from backend
-          CAVEMAN=$(curl -sf "https://expression-beverly-supplies-contribution.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
+          CAVEMAN=$(curl -sf "https://separately-modify-postal-therapeutic.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
           if [ -n "$CAVEMAN" ]; then
             echo "Caveman rules fetched"
             SYSTEM_PROMPT="$CAVEMAN"
           fi
 
           # Fetch framework skill from backend
-          FRAMEWORK_SKILL=$(curl -sf "https://expression-beverly-supplies-contribution.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
+          FRAMEWORK_SKILL=$(curl -sf "https://separately-modify-postal-therapeutic.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
           if [ -n "$FRAMEWORK_SKILL" ]; then
             echo "Framework skill fetched for: $FRAMEWORK"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${FRAMEWORK_SKILL}"
@@ -92,7 +92,7 @@ jobs:
           fi
 
           # Fetch laporan rules from backend
-          LAPORAN=$(curl -sf "https://expression-beverly-supplies-contribution.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
+          LAPORAN=$(curl -sf "https://separately-modify-postal-therapeutic.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
           if [ -n "$LAPORAN" ]; then
             echo "Laporan rules fetched"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${LAPORAN}"
@@ -156,7 +156,7 @@ jobs:
           # Notify PR service → triggers Discord notification (service handles draft→ready based on verdict)
           JOB_STATUS="${{ job.status }}"
           echo "Notifying PR service... (status=$JOB_STATUS)"
-          curl -sf -X POST "https://expression-beverly-supplies-contribution.trycloudflare.com/webhook/claude-done" \
+          curl -sf -X POST "https://separately-modify-postal-therapeutic.trycloudflare.com/webhook/claude-done" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
             -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER,\"status\":\"$JOB_STATUS\"}" \
