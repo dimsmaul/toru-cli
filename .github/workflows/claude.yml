@@ -15,25 +15,25 @@ jobs:
     if: |
       (
         github.event_name == 'issue_comment' &&
-        contains(github.event.comment.body, '@claude') &&
+        contains(github.event.comment.body, '@claude review once') &&
         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@claude') &&
+        contains(github.event.comment.body, '@claude review once') &&
         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@claude') &&
+        contains(github.event.review.body, '@claude review once') &&
         (github.event.review.author_association == 'OWNER' || github.event.review.author_association == 'MEMBER' || github.event.review.author_association == 'COLLABORATOR')
       ) ||
       (
         github.event_name == 'issues' &&
-        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        (contains(github.event.issue.body, '@claude review once') || contains(github.event.issue.title, '@claude review once')) &&
         (github.event.issue.author_association == 'OWNER' || github.event.issue.author_association == 'MEMBER' || github.event.issue.author_association == 'COLLABORATOR')
       )
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: claude-code
     concurrency:
       group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.event.issue.number }}
@@ -76,14 +76,14 @@ jobs:
           SYSTEM_PROMPT=""
 
           # Fetch caveman rules from backend
-          CAVEMAN=$(curl -sf "http://localhost:8080/skills/caveman/SKILL.md" 2>/dev/null) || true
+          CAVEMAN=$(curl -sf "https://promising-corner-durable-steel.trycloudflare.com/skills/caveman/SKILL.md" 2>/dev/null) || true
           if [ -n "$CAVEMAN" ]; then
             echo "Caveman rules fetched"
             SYSTEM_PROMPT="$CAVEMAN"
           fi
 
           # Fetch framework skill from backend
-          FRAMEWORK_SKILL=$(curl -sf "http://localhost:8080/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
+          FRAMEWORK_SKILL=$(curl -sf "https://promising-corner-durable-steel.trycloudflare.com/api/dynamic-skill?framework=$FRAMEWORK" 2>/dev/null) || true
           if [ -n "$FRAMEWORK_SKILL" ]; then
             echo "Framework skill fetched for: $FRAMEWORK"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${FRAMEWORK_SKILL}"
@@ -92,10 +92,25 @@ jobs:
           fi
 
           # Fetch laporan rules from backend
-          LAPORAN=$(curl -sf "http://localhost:8080/skills/laporan/SKILL.md" 2>/dev/null) || true
+          LAPORAN=$(curl -sf "https://promising-corner-durable-steel.trycloudflare.com/skills/laporan/SKILL.md" 2>/dev/null) || true
           if [ -n "$LAPORAN" ]; then
             echo "Laporan rules fetched"
             SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${LAPORAN}"
+          fi
+
+          # Per-project context: .review/context/*.md from the checked-out repo, appended
+          # AFTER the global skills so a project can extend/override. Sorted alphabetically,
+          # capped at 256KB total.
+          if [ -d .review/context ]; then
+            PROJECT_CTX=""
+            for f in $(ls .review/context/*.md 2>/dev/null | sort); do
+              PROJECT_CTX="${PROJECT_CTX}"$'\n\n'"$(cat "$f")"
+            done
+            PROJECT_CTX=$(printf '%s' "$PROJECT_CTX" | head -c 262144)
+            if [ -n "$PROJECT_CTX" ]; then
+              echo "Project context (.review/context) loaded"
+              SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"# Project context (.review/context)"$'\n'"${PROJECT_CTX}"
+            fi
           fi
 
           # Write combined content to APPEND_SYSTEM_PROMPT
@@ -115,15 +130,28 @@ jobs:
           additional_permissions: |
             actions: read
 
+          # Auto-review prompt for pull_request events (no comment body available).
+          # For issue_comment events, the comment body is used as prompt automatically.
+          prompt: ${{ github.event_name == 'pull_request' && '@claude review once' || '' }}
+
+          # Use sticky comment so review output is posted as a PR comment.
+          # Without this, pull_request-triggered reviews have no parent comment
+          # to reply to and the review output is lost.
+          use_sticky_comment: true
+
+          # Enable full output for debugging review issues.
+          show_full_output: true
+
           # Optional: Add claude_args to customize behavior and configuration
           # We MUST include the default MCP tools (Read, Glob, LS, mcp__github_comment...)
           # otherwise they get overridden and Claude cannot post the review comment.
-          claude_args: '--allowed-tools "Glob,Grep,LS,Read,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,Bash"'
+          claude_args: '--model claude-opus-4-8 --allowed-tools "Glob,Grep,LS,Read,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,Bash"'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           APPEND_SYSTEM_PROMPT: ${{ env.APPEND_SYSTEM_PROMPT }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SECURITY_API_TOKEN: ${{ secrets.SECURITY_API_TOKEN }}
 
       - name: Post-Review Actions (Discord Notify)
         if: always()
@@ -140,11 +168,12 @@ jobs:
           fi
 
           # Notify PR service → triggers Discord notification (service handles draft→ready based on verdict)
-          echo "Notifying PR service..."
-          curl -sf -X POST "http://localhost:8080/webhook/claude-done" \
+          JOB_STATUS="${{ job.status }}"
+          echo "Notifying PR service... (status=$JOB_STATUS)"
+          curl -sf -X POST "https://promising-corner-durable-steel.trycloudflare.com/webhook/claude-done" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CLAUDE_DONE_SECRET" \
-            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER}" \
+            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER,\"status\":\"$JOB_STATUS\"}" \
             && echo "Service notified successfully" \
             || echo "Service notification failed (non-fatal)"
 
