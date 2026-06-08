@@ -145,7 +145,7 @@ jobs:
           # Optional: Add claude_args to customize behavior and configuration
           # We MUST include the default MCP tools (Read, Glob, LS, mcp__github_comment...)
           # otherwise they get overridden and Claude cannot post the review comment.
-          claude_args: '--model claude-opus-4-6 --allowed-tools "Glob,Grep,LS,Read,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,Bash"'
+          claude_args: '--model claude-opus-4-8 --allowed-tools "Glob,Grep,LS,Read,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,Bash"'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           APPEND_SYSTEM_PROMPT: ${{ env.APPEND_SYSTEM_PROMPT }}
